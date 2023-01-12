@@ -32,7 +32,7 @@ depth_cutoff = 6
 min_good_alignment_samples = .4 # % of samples with bad alignment
 simulation_round = 1000
 pvalue_max = 0.05
-
+max_depth_fold = 2  #fold change depth/gene copy for PE genes, max 2 copy of genes
 try:
     os.mkdir(summary_folder)
 except IOError:
@@ -90,9 +90,10 @@ def load_genes(assembly,allSNPscov):
         if allSNPscovsub.shape[0] > 0:
             record_seq_len = len(str(record.seq))
             gene_copy_number = np.median(allSNPscovsub['avg_depth'])/depth_median
-            gene_length.setdefault(record_id, [record_seq_len,gene_copy_number]) #gene length, depth fold = copy number
-            total_gene_length += record_seq_len
-            gene_copy_output.append('%s\t%s\n'%(record_id,gene_copy_number))
+            if gene_copy_number < max_depth_fold:
+                gene_length.setdefault(record_id, [record_seq_len,gene_copy_number]) #gene length, depth fold = copy number
+                total_gene_length += record_seq_len
+                gene_copy_output.append('%s\t%s\n'%(record_id,gene_copy_number))
     f1 = open(assembly + '.copynum.txt','w')
     f1.write('gene_name\tcopy_number\n')
     f1.write(''.join(gene_copy_output))
@@ -118,8 +119,10 @@ def pvalue_mutgene(SNP, ORFlength,gene_length,gene_set):
             SNP_gene,SNP_genome_set,num_strains_with_mut,truncation_gene,N_SNP_gene = gene_set.get(gene,[0,set(),[1],0,0])
             num_strains_with_mut = mean(num_strains_with_mut)
             this_gene_length,gene_copy_num = gene_length[gene]
-            # considering the prevalence of this gene among strains
-            pvalue = 1-poisson.cdf(SNP_gene - 1,mut_rate*this_gene_length*num_strains_with_mut)# greater than and equal to
+            # NOT USED considering the prevalence of this gene among strains
+            #pvalue = 1-poisson.cdf(SNP_gene - 1,mut_rate*this_gene_length*num_strains_with_mut)# greater than and equal to
+            # treat all genes prevalence as 100%
+            pvalue = 1 - poisson.cdf(SNP_gene - 1, mut_rate * this_gene_length)
             #k, n, p = [SNP_gene, this_gene_length, mut_rate * num_strains_with_mut]
             #pvalue = 1 - binom.cdf(k-1, n, p)   # greater than and equal to
             allsum_details.append('%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%.3f\t%.5f\t%s\n'%(lineage,gene,pvalue,SNP_gene,N_SNP_gene,truncation_gene,this_gene_length,gene_copy_num,num_strains_with_mut,mut_rate*1000,len(SNP_genome_set)))
@@ -158,7 +161,9 @@ def mutation_sim(SNP, ORFlength,gene_length,pvalueset,SNP_genome_set_all):
             if geneID in allgenes_mut:
                 SNP_gene = gene_mut.count(geneID)
                 this_gene_length,gene_copy_num = gene_length[geneID]
-                pvalue = 1 - poisson.cdf(SNP_gene - 1, mut_rate * this_gene_length * num_strains_with_mut) # greater than and equal to
+                #pvalue = 1 - poisson.cdf(SNP_gene - 1, mut_rate * this_gene_length * num_strains_with_mut) # greater than and equal to
+                # treat all genes prevalence as 100%
+                pvalue = 1 - poisson.cdf(SNP_gene - 1, mut_rate * this_gene_length)
                 #k, n, p = [SNP_gene, this_gene_length, mut_rate * num_strains_with_mut]
                 #pvalue = 1 - binom.cdf(k-1, n, p)  # greater than and equal to
                 allgenepvalue.append('%s\t%s\n' % (i, pvalue))
@@ -186,8 +191,9 @@ def depth_screening(allSNPscov):
     total_genomes = allSNPscov.shape[1] - 3
     for i in allSNPscov.index:
         non_zero_depth = [x for x in allSNPscov.iloc[i, 3:] if x > 0]
-        if len(non_zero_depth) >= min_good_alignment_samples * total_genomes:
-            # good prevalence
+        good_depth = [x for x in allSNPscov.iloc[i, 3:] if x > depth_cutoff]
+        if len(good_depth) >= min_good_alignment_samples * total_genomes:
+            # good coverage, >= min_fraction_of_good_coverage isolates with >= min_depth depth
             allSNPscov.loc[i, 'avg_depth'] = np.mean(non_zero_depth)
         else:
             allSNPscov.loc[i, 'avg_depth'] = 0
@@ -215,27 +221,27 @@ for lineage in lineage_SNP:
     allSNPscov = depth_screening(allSNPscov)
     nonORFlength,ORFlength = find_clonal(lineage) # callable genome length
     SNP, gene_set = lineage_SNP[lineage]
-    if SNP > 1 and gene_set!=dict(): #SNPs on gene > 1
-        lineage_new = lineage.replace('_clustercluster', '_CL').replace('_PB_', '_PaDi_').split('.donor')[0]
-        if ORFlength == 0:
-            print('no clonal infor for %s %s in %s'%(lineage,lineage.split('_lineage')[0],clonal_file))
-        else:
-            # load gene length
-            assembly = find_assemlby(lineage)
-            if assembly == []:
-                print('no assembly for %s in %s' % (lineage, assembly_folder))
-            else:
-                assembly = assembly[0]
-                # load gene length for all genes
-                gene_length,total_gene_length = load_genes(assembly.replace('.fasta','.fna'),allSNPscov) #total_gene_length not used
-                print('process %s %s SNPs %s ORF length' % (lineage, SNP, ORFlength))
-                # compute pvalue for all genes
-                pvalueset, SNP_genome_set_all = pvalue_mutgene(SNP,ORFlength,gene_length,gene_set)
-                print('finish compute poisson pvalue %s PE pvalue set %s SNP genome set %s' % (lineage,pvalueset,SNP_genome_set_all))
-                if len(pvalueset) > 0:
-                    # simulation
-                    mutation_sim(SNP, ORFlength,gene_length,pvalueset,SNP_genome_set_all)
-                print('finish simulation %s' % (lineage))
+    # load gene length
+    assembly = find_assemlby(lineage)
+    if assembly == []:
+        print('no assembly for %s in %s' % (lineage, assembly_folder))
+    else:
+        assembly = assembly[0]
+        # load gene length for all genes
+        gene_length, total_gene_length = load_genes(assembly.replace('.fasta', '.fna'), allSNPscov)
+        print('process %s %s SNPs %s all ORF length with coverage %s all ORF length with coverage and 1 copy' % (
+        lineage, SNP, ORFlength, total_gene_length))
+        ORFlength = total_gene_length  # not considering genes with >= 2 copies
+        if SNP > 1 and gene_set != dict():  # SNPs on gene > 1
+            lineage_new = lineage.replace('_clustercluster', '_CL').replace('_PB_', '_PaDi_').split('.donor')[0]
+            # compute pvalue for all genes
+            pvalueset, SNP_genome_set_all = pvalue_mutgene(SNP, ORFlength, gene_length, gene_set)
+            print('finish compute poisson pvalue %s PE pvalue set %s SNP genome set %s' % (
+            lineage, pvalueset, SNP_genome_set_all))
+            if len(pvalueset) > 0:
+                # simulation
+                mutation_sim(SNP, ORFlength, gene_length, pvalueset, SNP_genome_set_all)
+            print('finish simulation %s' % (lineage))
 
 foutput = open('%s/allgenes.poisson.pvalue.within.txt'%(summary_folder), 'w')
 foutput.write(''.join(allsum_details))

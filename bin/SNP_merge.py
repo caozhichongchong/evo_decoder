@@ -29,9 +29,10 @@ min_quality_alignment = 50 # quality for alignment
 min_sample_alignment = 0.95 # at least X% samples have alignment >= min_quality_alignment
 min_CI_coverage_for_genome = 0.05 # at least 5% CI for minimum coverage
 max_depth_fold = 2  #fold change depth for POSs to call SNPs, max 2 copy of genes
+depth_range = [0.01,0.99]  #quantile depth for POSs to call SNPs
 depth_distance = 2 # remove up and down X*1000 bp regions with low depth
 depth_distance_diff = 10 # neighbour average depth has X fold difference
-
+depth_range_set = False # whether to filter by quantile depth
 try:
     os.mkdir(args.i + '/mergevcf/')
 except IOError:
@@ -367,12 +368,15 @@ def genome_screening(allSNPscov):
     coverage_genomeset = []
     allgenomes = list(allSNPscov.columns)[3:]
     allgenomes.sort()
+    total_genome_coverage_set = []
     for genome in allgenomes:
         average_genome_depth = np.mean(allSNPscov.loc[:,genome])
         total_genome_coverage = len([x for x in allSNPscov.loc[:,genome] if x >= min_depth])
         coverage_genomeset.append(total_genome_coverage/total_genome_length)
         genome_coverage_info.setdefault(genome,[average_genome_depth,total_genome_coverage/total_genome_length])
-    coverage_genomeset_cutoff = poisson.ppf(min_CI_coverage_for_genome,total_genome_coverage*np.mean(coverage_genomeset))/total_genome_coverage
+        total_genome_coverage_set.append(total_genome_coverage)
+    coverage_genomeset_cutoff = poisson.ppf(min_CI_coverage_for_genome,
+                                            np.mean(total_genome_coverage_set)*np.mean(coverage_genomeset))/np.mean(total_genome_coverage_set)
     for genome in genome_coverage_info:
         average_genome_depth,genome_coverage = genome_coverage_info[genome]
         if average_genome_depth < min_depth or genome_coverage < coverage_genomeset_cutoff:
@@ -401,12 +405,21 @@ def depth_screening(allSNPscov,low_quality_genomes):
                     # depth screening
             avg_depth_set = [x for x in allSNPscov['avg_depth'] if x > 0]
             max_depth_set = [x for x in allSNPscov['max_depth'] if x > 0]
-            depth_range_lineage = np.median(avg_depth_set) * max_depth_fold
-            print(depth_range_lineage,np.quantile(avg_depth_set,[0.95]))
-            depth_range_max_lineage = np.median(max_depth_set) * max_depth_fold
-            print(depth_range_max_lineage, np.quantile(max_depth_set, [0.95]))
-            invalid_CHRPOS = allSNPscov.loc[(allSNPscov['avg_depth'] >= depth_range_lineage) | (
-                                                    allSNPscov['max_depth'] >= depth_range_max_lineage),
+            if depth_range_set:
+                depth_range_lineage = np.quantile(avg_depth_set, depth_range)
+                depth_range_lineage[1] = min(depth_range_lineage[1], np.median(avg_depth_set) * max_depth_fold)
+                depth_range_lineage[0] = max(depth_range_lineage[0], min_depth)
+                depth_range_max_lineage = np.quantile(max_depth_set,
+                                                      depth_range)  # np.median(max_depth_set) * max_depth_fold
+                depth_range_max_lineage[1] = min(depth_range_max_lineage[1], np.median(max_depth_set) * max_depth_fold)
+            else:
+                depth_range_lineage = [min_depth,np.median(avg_depth_set) * max_depth_fold]
+                depth_range_max_lineage = [min_depth,np.median(max_depth_set) * max_depth_fold]
+            print(depth_range_lineage, np.quantile(avg_depth_set, depth_range))
+            print(depth_range_max_lineage, np.quantile(max_depth_set, depth_range))
+            invalid_CHRPOS = allSNPscov.loc[(allSNPscov['avg_depth'] <= depth_range_lineage[0]) | (
+                    allSNPscov['avg_depth'] >= depth_range_lineage[1]) | (
+                                                    allSNPscov['max_depth'] >= depth_range_max_lineage[1]),
                              :]  # for example, for plasmids, genes with multiple copy number
             # add regions with a drop of depth
             invalid_CHRPOS_list = list(invalid_CHRPOS.index)
